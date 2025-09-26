@@ -93,8 +93,8 @@ func (d *Device) Left() {
 
 func (d *Device) Stop() {
 	d.buf[1] = uint8(Forward)
-	d.buf[2] = 20
+	d.buf[2] = 0
 	d.buf[3] = uint8(Forward)
-	d.buf[4] = 20
+	d.buf[4] = 0
 	d.bus.Tx(uint16(d.Address), d.buf, nil)
 }
