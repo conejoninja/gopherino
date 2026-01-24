@@ -72,7 +72,7 @@ func main() {
 	err := adapter.Scan(func(adapter *bluetooth.Adapter, result bluetooth.ScanResult) {
 		println("found device:", result.Address.String(), result.RSSI, result.LocalName())
 		if result.Address.String() == "C3:C3:6C:81:24:11" {
-			println("✅ FoundGopherino:", result.Address.String())
+			println("✅ Found Gopherino:", result.Address.String())
 
 			adapter.StopScan()
 			ch <- result
