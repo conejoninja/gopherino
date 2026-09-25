@@ -14,6 +14,23 @@ Gopherino is a robot based on the [Maqueen v4.1 platform](https://wiki.dfrobot.c
 - Motors runs on I2C
 
 
+## BLE firmware (nicectrlr remote)
+
+[`ble/main`](ble/main/) turns Gopherino into a Bluetooth robot driven by the [nicectrlr](https://code.madriguera.me/GoEducation/nicectrlr) dual-stick controller running its [`gopherino-remote`](https://code.madriguera.me/GoEducation/nicectrlr/src/branch/main/examples/gopherino-remote) example. Press X on the remote to cycle through the modes:
+
+| Mode | Controls | LEDs |
+|------|----------|------|
+| Normal | Left stick drives both wheels. A: beep, Y: horn, B: flash, L/R: left/right red LED | Blue |
+| Tank | Left stick = left wheel, right stick = right wheel. Same buttons as Normal | Green |
+| Music | Y/B/A/L/R play C/D/E/G/A on the buzzer for as long as they're held. Left stick: octave, right stick: pitch bend | Rainbow |
+| Auto | Gopherino drives by itself and dodges obstacles with the HC-SR04 | Solid red while driving, blinking red on an obstacle |
+
+The robot also reports its HC-SR04 distance to the remote, and stops if the remote goes quiet for half a second or disconnects. The wire protocol is described in [`ble/main/protocol.go`](ble/main/protocol.go). The older Badger 2040 W remote in `ble/gamepad` speaks the previous protocol and doesn't work with this firmware.
+
+```sh
+tinygo flash -target microbit-v2-s113v7 ./ble/main
+```
+
 ## Ideas
 The current code in this repository for Gopherino is quite simple, as it only uses the HC-SR04 ultrasonic sensor and the motors to avoid obstacles. So the possibilities to expand it are limitless. Here are some ideas.
 

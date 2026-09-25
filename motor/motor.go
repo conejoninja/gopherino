@@ -98,3 +98,25 @@ func (d *Device) Stop() {
 	d.buf[4] = 0
 	d.bus.Tx(uint16(d.Address), d.buf, nil)
 }
+
+// Drive sets each wheel's speed independently. left and right go from -255
+// (full speed backward) to 255 (full speed forward); 0 stops that wheel.
+func (d *Device) Drive(left, right int16) {
+	d.buf[1], d.buf[2] = dirSpeed(left)
+	d.buf[3], d.buf[4] = dirSpeed(right)
+	d.bus.Tx(uint16(d.Address), d.buf, nil)
+}
+
+func dirSpeed(v int16) (uint8, uint8) {
+	if v < 0 {
+		v = -v
+		if v > 255 {
+			v = 255
+		}
+		return uint8(Backward), uint8(v)
+	}
+	if v > 255 {
+		v = 255
+	}
+	return uint8(Forward), uint8(v)
+}

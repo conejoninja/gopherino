@@ -1,72 +1,69 @@
 package main
 
+// Gopherino BLE firmware, driven by the nicectrlr "gopherino-remote" example
+// (code.madriguera.me/GoEducation/nicectrlr/examples/gopherino-remote).
+//
+// The remote picks one of four modes:
+//   - Normal: the remote mixes one joystick into two wheel speeds. LEDs blue.
+//   - Tank:   each joystick drives one wheel. LEDs green.
+//   - Music:  the remote's buttons play notes on the buzzer. LEDs rainbow.
+//   - Auto:   obstacle avoidance with the HC-SR04. LEDs solid red while
+//     driving, blinking red while dodging an obstacle.
+//
+// In Normal and Tank the remote's buttons beep or flash the lights for a
+// moment. See protocol.go for the wire format.
+//
+// Flash with:
+//
+//	tinygo flash -target microbit-v2-s113v7 ./ble/main
+
 import (
-	"image/color"
 	"machine"
+	"runtime/volatile"
 	"time"
 
 	"tinygo.org/x/bluetooth"
-	"tinygo.org/x/drivers/buzzer"
 	"tinygo.org/x/drivers/hcsr04"
-	"tinygo.org/x/drivers/ws2812"
 
 	"github.com/conejoninja/gopherino/motor"
 )
 
 const (
-	STOP = iota
-	LEFT
-	PARTY
-	RIGHT
-	FORWARD
-	BACKWARD
-	AUTOMODE
+	tick = 20 * time.Millisecond
+
+	// Motor speed (0..255) sent for a 100% stick deflection.
+	maxSpeed = 200
+
+	// Normal/Tank: stop the wheels if the remote goes quiet for this long
+	// (out of range, crashed, ...). The remote sends a drive command at
+	// least every 150ms.
+	driveTimeout = 500 * time.Millisecond
+
+	// How often the distance is measured and reported outside Auto mode.
+	statusInterval = 250 * time.Millisecond
 )
 
 var (
-	adapter                 = bluetooth.DefaultAdapter
-	adv                     *bluetooth.Advertisement
-	gopherinoServiceUUID    = bluetooth.NewUUID([16]byte{0xa0, 0xb4, 0x00, 0x01, 0x92, 0x6d, 0x4d, 0x61, 0x98, 0xdf, 0x8c, 0x5c, 0x62, 0xee, 0x53, 0x72})
-	gopherinoCharUUID       = bluetooth.NewUUID([16]byte{0xa0, 0xb4, 0x00, 0x02, 0x92, 0x6d, 0x4d, 0x61, 0x98, 0xdf, 0x8c, 0x5c, 0x62, 0xee, 0x53, 0x72})
-	gopherinoCharacteristic bluetooth.Characteristic
+	adapter = bluetooth.DefaultAdapter
 
-	d                   int32
-	maqueenHCSR04       hcsr04.Device
-	i2c                 = machine.I2C1
-	maqueenMotor        *motor.Device
-	lineLeft, lineRight machine.Pin
-	gopherinoStatus     byte = STOP
-	isPartying          bool
+	i2c           = machine.I2C1
+	maqueenMotor  *motor.Device
+	maqueenHCSR04 hcsr04.Device
 
-	neo    machine.Pin = machine.P15
-	leds   [4]color.RGBA
-	rg     bool
-	ws     ws2812.Device
-	bzrPin machine.Pin = machine.P27
-	bzr    buzzer.Device
-	song   = []note{
-		{buzzer.E4, buzzer.Eighth},
-		{buzzer.E4, buzzer.Eighth},
-		{buzzer.Rest, buzzer.Eighth},
-		{buzzer.E4, buzzer.Eighth},
+	mode      byte = modeNormal
+	lastDrive time.Time
 
-		{buzzer.Rest, buzzer.Eighth},
-		{buzzer.C4, buzzer.Eighth},
-		{buzzer.E4, buzzer.Quarter},
-		{buzzer.G4, buzzer.Quarter},
+	wheelL, wheelR int16 // last speeds sent to the motor driver
 
-		{buzzer.Rest, buzzer.Eighth},
-		{buzzer.G3, buzzer.Quarter},
-	}
+	distanceMM int32 // last HC-SR04 reading, 0 = nothing in range
+	nextStatus time.Time
+
+	// disconnected is set from the BLE connect handler, which runs in
+	// interrupt context, and handled by the main loop.
+	disconnected volatile.Register8
 )
 
-type note struct {
-	tone     float64
-	duration float64
-}
-
 func main() {
-
 	maqueenHCSR04 = hcsr04.New(machine.P1, machine.P2)
 	maqueenHCSR04.Configure()
 	i2c.Configure(machine.I2CConfig{
@@ -78,53 +75,34 @@ func main() {
 	maqueenMotor.Configure()
 	maqueenMotor.Stop()
 
-	neo.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	ws = ws2812.NewWS2812(neo)
-
-	bzrPin.Configure(machine.PinConfig{Mode: machine.PinOutput})
-
-	bzr = buzzer.New(bzrPin)
+	initLights()
+	must("init sound", initSound())
 
 	startBLE()
 
 	for {
-		switch gopherinoStatus {
-		case STOP:
-			maqueenMotor.Stop()
-			break
-		case FORWARD:
-			maqueenMotor.Stop()
-			maqueenMotor.Forward()
-			break
-		case BACKWARD:
-			maqueenMotor.Stop()
-			maqueenMotor.Backward()
-			break
-		case LEFT:
-			maqueenMotor.Stop()
-			maqueenMotor.SpinLeft()
-			break
-		case RIGHT:
-			maqueenMotor.Stop()
-			maqueenMotor.SpinRight()
-			break
-		case PARTY:
-			maqueenMotor.Stop()
-			partyMode()
-			break
-		case AUTOMODE:
-			d = maqueenHCSR04.ReadDistance()
-			if d < 60 {
-				maqueenMotor.Stop()
-				maqueenMotor.SpinRight()
-			} else {
-				maqueenMotor.Stop()
-				maqueenMotor.Forward()
-			}
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
+		now := time.Now()
 
+		if disconnected.Get() != 0 {
+			disconnected.Set(0)
+			setMode(modeNormal)
+		}
+		processCommands(now)
+
+		switch mode {
+		case modeNormal, modeTank:
+			if now.Sub(lastDrive) > driveTimeout {
+				setWheels(0, 0)
+			}
+		case modeAuto:
+			tickAuto(now)
+		}
+
+		updateSound(now)
+		updateLights(now)
+		updateStatus(now)
+
+		time.Sleep(tick)
 	}
 }
 
@@ -135,10 +113,14 @@ func must(action string, err error) {
 }
 
 func startBLE() {
-	println("starting")
-	time.Sleep(200 * time.Millisecond)
+	adapter.SetConnectHandler(func(d bluetooth.Device, connected bool) {
+		if !connected {
+			disconnected.Set(1)
+		}
+	})
+
 	must("enable BLE stack", adapter.Enable())
-	adv = adapter.DefaultAdvertisement()
+	adv := adapter.DefaultAdvertisement()
 	must("config adv", adv.Configure(bluetooth.AdvertisementOptions{
 		LocalName: "Gopherino",
 	}))
@@ -150,59 +132,65 @@ func startBLE() {
 			{
 				Handle: &gopherinoCharacteristic,
 				UUID:   gopherinoCharUUID,
-				Flags:  bluetooth.CharacteristicReadPermission | bluetooth.CharacteristicWritePermission | bluetooth.CharacteristicWriteWithoutResponsePermission,
-				WriteEvent: func(client bluetooth.Connection, offset int, value []byte) {
-					if len(value) == 2 {
-						if value[0] == 1 {
-							gopherinoStatus = value[1]
-							println(value[1], PARTY, isPartying)
-							if value[1] == PARTY && isPartying {
-								gopherinoStatus = AUTOMODE
-							}
-						}
-						if value[0] == 2 && value[1] != PARTY {
-							gopherinoStatus = STOP
-						}
-					}
-				},
+				Flags: bluetooth.CharacteristicReadPermission |
+					bluetooth.CharacteristicWritePermission |
+					bluetooth.CharacteristicWriteWithoutResponsePermission |
+					bluetooth.CharacteristicNotifyPermission,
+				WriteEvent: queueCommand,
 			},
 		},
 	}))
-
 }
 
-func partyMode() {
-	isPartying = true
-	go func() {
-		for isPartying {
-			rg = !rg
-			for i := range leds {
-				rg = !rg
-				if rg {
-					// Alpha channel is not supported by WS2812 so we leave it out
-					leds[i] = color.RGBA{R: 0xff, G: 0x00, B: 0x00}
-				} else {
-					leds[i] = color.RGBA{R: 0x00, G: 0xff, B: 0x00}
-				}
-			}
-
-			ws.WriteColors(leds[:])
-			time.Sleep(100 * time.Millisecond)
-		}
-		for i := range leds {
-			leds[i] = color.RGBA{R: 0x00f, G: 0x00, B: 0xff}
-		}
-		ws.WriteColors(leds[:])
-	}()
-
-	for _, val := range song {
-		bzr.Tone(val.tone, val.duration/2)
-		time.Sleep(10 * time.Millisecond)
+// setMode switches to m, always starting from a stopped, silent robot.
+func setMode(m byte) {
+	if m >= numModes {
+		return
 	}
-	println(gopherinoStatus, AUTOMODE, PARTY, isPartying)
+	mode = m
+	setWheels(0, 0)
+	stopSound()
+	resetAuto()
+	resetFlashes()
+	println("mode", m)
+}
 
-	if gopherinoStatus != AUTOMODE {
-		gopherinoStatus = STOP
+// setWheels drives each wheel at a signed percentage (-100..100) of
+// maxSpeed. The motor driver is only written to when something changed.
+func setWheels(left, right int) {
+	l := int16(clamp(left, -100, 100) * maxSpeed / 100)
+	r := int16(clamp(right, -100, 100) * maxSpeed / 100)
+	if l == wheelL && r == wheelR {
+		return
 	}
-	isPartying = false
+	wheelL, wheelR = l, r
+	maqueenMotor.Drive(l, r)
+}
+
+// updateStatus measures the distance (Auto mode already does it every tick)
+// and notifies it to the remote, every statusInterval.
+func updateStatus(now time.Time) {
+	if now.Before(nextStatus) {
+		return
+	}
+	nextStatus = now.Add(statusInterval)
+	if mode != modeAuto {
+		measureDistance()
+	}
+	sendStatus()
+}
+
+func measureDistance() int32 {
+	distanceMM = maqueenHCSR04.ReadDistance()
+	return distanceMM
+}
+
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }

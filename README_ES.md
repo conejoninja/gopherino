@@ -14,6 +14,23 @@ Gopherino es un robot basado en la [plataforma Maqueen v4.1](https://wiki.dfrobo
 - Motores conectados por I²C
 
 
+## Firmware BLE (mando nicectrlr)
+
+[`ble/main`](ble/main/) convierte a Gopherino en un robot Bluetooth que se controla con el mando de dos joysticks [nicectrlr](https://code.madriguera.me/GoEducation/nicectrlr) usando su ejemplo [`gopherino-remote`](https://code.madriguera.me/GoEducation/nicectrlr/src/branch/main/examples/gopherino-remote). Pulsa X en el mando para cambiar de modo:
+
+| Modo | Controles | LEDs |
+|------|-----------|------|
+| Normal | El joystick izquierdo mueve las dos ruedas. A: pitido, Y: claxon, B: destello, L/R: LED rojo izquierdo/derecho | Azul |
+| Tanque | Joystick izquierdo = rueda izquierda, joystick derecho = rueda derecha. Mismos botones que en Normal | Verde |
+| Música | Y/B/A/L/R tocan Do/Re/Mi/Sol/La en el zumbador mientras se mantienen pulsados. Joystick izquierdo: octava, joystick derecho: desafinar | Arcoíris |
+| Auto | Gopherino conduce solo y esquiva obstáculos con el HC-SR04 | Rojo fijo en marcha, rojo parpadeando ante un obstáculo |
+
+El robot envía al mando la distancia que mide el HC-SR04, y se para si deja de recibir órdenes durante medio segundo o si se desconecta. El protocolo está descrito en [`ble/main/protocol.go`](ble/main/protocol.go). El mando antiguo para Badger 2040 W de `ble/gamepad` usa el protocolo anterior y no funciona con este firmware.
+
+```sh
+tinygo flash -target microbit-v2-s113v7 ./ble/main
+```
+
 ## Ideas
 El actual código de Gopherino es bastante simple. Usa el sensor de ultrasonidos HC-SR04 para detectar un obstáculo y cambiar el rumbo. Así que no hay límite en las posibilidades de expandir su funcionamiento. Aquí hay algunas ideas:
 
